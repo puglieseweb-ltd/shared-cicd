@@ -1,0 +1,67 @@
+name: Sentry Source Maps
+description: Upload source maps to Sentry and optionally remove them from the build output
+
+inputs:
+  version:
+    description: Release version (e.g. v1.2.3 or commit SHA)
+    required: true
+  dist-directory:
+    description: Directory containing built assets with source maps
+    required: false
+    default: 'dist/assets'
+  url-prefix:
+    description: URL prefix for source maps (e.g. ~/assets)
+    required: false
+    default: '~/assets'
+  working-directory:
+    description: Working directory
+    required: false
+    default: '.'
+  delete-maps:
+    description: Delete .map files from dist after upload (true/false)
+    required: false
+    default: 'true'
+  dist-root:
+    description: Root dist directory for map deletion
+    required: false
+    default: 'dist'
+  sentry-auth-token:
+    description: Sentry authentication token
+    required: true
+  sentry-org:
+    description: Sentry organization slug
+    required: true
+  sentry-project:
+    description: Sentry project slug
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Install Sentry CLI
+      shell: bash
+      run: npm install -g @sentry/cli
+
+    - name: Upload source maps to Sentry
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        SENTRY_AUTH_TOKEN: ${{ inputs.sentry-auth-token }}
+        SENTRY_ORG: ${{ inputs.sentry-org }}
+        SENTRY_PROJECT: ${{ inputs.sentry-project }}
+      run: |
+        sentry-cli releases new "${{ inputs.version }}"
+        sentry-cli sourcemaps upload ${{ inputs.dist-directory }} \
+          --release "${{ inputs.version }}" \
+          --url-prefix '${{ inputs.url-prefix }}' \
+          --validate
+        sentry-cli releases finalize "${{ inputs.version }}"
+        echo "Source maps uploaded for release ${{ inputs.version }}"
+
+    - name: Remove source maps from build
+      if: inputs.delete-maps == 'true'
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: |
+        find ${{ inputs.dist-root }} -name "*.map" -delete
+        echo "Source maps removed from ${{ inputs.dist-root }}"
