@@ -1,0 +1,104 @@
+name: SPA Deploy
+
+on:
+  workflow_call:
+    inputs:
+      node-version:
+        description: Node.js version to use
+        type: string
+        default: '20'
+      working-directory:
+        description: Directory containing package.json
+        type: string
+        default: '.'
+      aws-region:
+        description: AWS region to deploy to
+        type: string
+        default: 'eu-west-2'
+      deploy-role-name:
+        description: IAM role name for OIDC authentication
+        required: true
+        type: string
+      s3-bucket:
+        description: S3 bucket name to sync built assets to
+        required: true
+        type: string
+      cloudfront-distribution-id:
+        description: CloudFront distribution ID to invalidate
+        required: true
+        type: string
+      environment:
+        description: GitHub environment name for approvals/secrets
+        type: string
+        default: 'production'
+    secrets:
+      AWS_ACCOUNT_ID:
+        required: true
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  build-and-deploy:
+    name: Build & Deploy SPA
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+
+      - name: Install dependencies
+        working-directory: ${{ inputs.working-directory }}
+        run: |
+          if [ -f "package-lock.json" ]; then
+            npm ci
+          else
+            npm install
+          fi
+
+      - name: Build
+        working-directory: ${{ inputs.working-directory }}
+        run: npm run build
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/${{ inputs.deploy-role-name }}
+          aws-region: ${{ inputs.aws-region }}
+
+      - name: Sync static assets to S3
+        working-directory: ${{ inputs.working-directory }}
+        run: |
+          aws s3 sync dist/ s3://${{ inputs.s3-bucket }} \
+            --delete \
+            --cache-control "public, max-age=31536000, immutable" \
+            --exclude "index.html" \
+            --exclude "*.json"
+
+          aws s3 cp dist/index.html s3://${{ inputs.s3-bucket }}/index.html \
+            --cache-control "no-cache, no-store, must-revalidate"
+
+          find dist -name "*.json" -exec sh -c \
+            'aws s3 cp "$1" s3://${{ inputs.s3-bucket }}/${1#dist/} --cache-control "no-cache"' _ {} \;
+
+      - name: Invalidate CloudFront cache
+        run: |
+          aws cloudfront create-invalidation \
+            --distribution-id ${{ inputs.cloudfront-distribution-id }} \
+            --paths "/*"
+
+      - name: Deployment Summary
+        run: |
+          cat >> "$GITHUB_STEP_SUMMARY" << EOF
+          ## SPA Deployment Summary
+
+          | Detail | Value |
+          |--------|-------|
+          | **S3 Bucket** | \`${{ inputs.s3-bucket }}\` |
+          | **Distribution** | \`${{ inputs.cloudfront-distribution-id }}\` |
+          | **Region** | \`${{ inputs.aws-region }}\` |
+          | **Status** | Deployed |
+          EOF
