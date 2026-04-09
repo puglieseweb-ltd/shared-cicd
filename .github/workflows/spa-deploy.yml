@@ -6,11 +6,11 @@ on:
       node-version:
         description: Node.js version to use
         type: string
-        default: '20'
-      working-directory:
-        description: Directory containing package.json
+        default: '22'
+      app-filter:
+        description: 'pnpm workspace filter (e.g. @puglieseweb/portal)'
         type: string
-        default: '.'
+        default: ''
       aws-region:
         description: AWS region to deploy to
         type: string
@@ -19,14 +19,22 @@ on:
         description: IAM role name for OIDC authentication
         required: true
         type: string
+      cfn-stack-name:
+        description: CloudFormation stack name to look up S3 bucket and CloudFront distribution ID
+        type: string
+        default: ''
       s3-bucket:
-        description: S3 bucket name to sync built assets to
-        required: true
+        description: S3 bucket name (used if cfn-stack-name is not set)
         type: string
+        default: ''
       cloudfront-distribution-id:
-        description: CloudFront distribution ID to invalidate
-        required: true
+        description: CloudFront distribution ID (used if cfn-stack-name is not set)
         type: string
+        default: ''
+      type-check:
+        description: Run type-check before build
+        type: boolean
+        default: true
       environment:
         description: GitHub environment name for approvals/secrets
         type: string
@@ -34,6 +42,12 @@ on:
     secrets:
       AWS_ACCOUNT_ID:
         required: true
+      REACT_APP_USER_POOL_ID:
+        required: false
+      REACT_APP_CLIENT_ID:
+        required: false
+      REACT_APP_API_URL:
+        required: false
 
 permissions:
   id-token: write
@@ -47,47 +61,88 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - uses: pnpm/action-setup@v4
+
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ inputs.node-version }}
+          cache: pnpm
 
       - name: Install dependencies
-        working-directory: ${{ inputs.working-directory }}
+        run: pnpm install --frozen-lockfile
+
+      - name: Type check
+        if: inputs.type-check
         run: |
-          if [ -f "package-lock.json" ]; then
-            npm ci
+          if [ -n "${{ inputs.app-filter }}" ]; then
+            pnpm --filter "${{ inputs.app-filter }}" run type-check
           else
-            npm install
+            pnpm type-check
           fi
 
       - name: Build
-        working-directory: ${{ inputs.working-directory }}
-        run: npm run build
+        run: |
+          if [ -n "${{ inputs.app-filter }}" ]; then
+            pnpm --filter "${{ inputs.app-filter }}" run build
+          else
+            pnpm build
+          fi
+        env:
+          REACT_APP_USER_POOL_ID: ${{ secrets.REACT_APP_USER_POOL_ID }}
+          REACT_APP_CLIENT_ID: ${{ secrets.REACT_APP_CLIENT_ID }}
+          REACT_APP_API_URL: ${{ secrets.REACT_APP_API_URL }}
 
       - uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/${{ inputs.deploy-role-name }}
           aws-region: ${{ inputs.aws-region }}
 
-      - name: Sync static assets to S3
-        working-directory: ${{ inputs.working-directory }}
+      - name: Resolve S3 bucket and CloudFront distribution
+        id: infra
         run: |
-          aws s3 sync dist/ s3://${{ inputs.s3-bucket }} \
+          if [ -n "${{ inputs.cfn-stack-name }}" ]; then
+            BUCKET=$(aws cloudformation describe-stacks \
+              --stack-name "${{ inputs.cfn-stack-name }}" \
+              --query "Stacks[0].Outputs[?OutputKey=='WebsiteBucketName'].OutputValue" \
+              --output text)
+            DIST_ID=$(aws cloudformation describe-stacks \
+              --stack-name "${{ inputs.cfn-stack-name }}" \
+              --query "Stacks[0].Outputs[?OutputKey=='CloudFrontDistributionId'].OutputValue" \
+              --output text)
+          else
+            BUCKET="${{ inputs.s3-bucket }}"
+            DIST_ID="${{ inputs.cloudfront-distribution-id }}"
+          fi
+          echo "bucket=$BUCKET" >> $GITHUB_OUTPUT
+          echo "distribution_id=$DIST_ID" >> $GITHUB_OUTPUT
+
+      - name: Find dist directory
+        id: dist
+        run: |
+          if [ -n "${{ inputs.app-filter }}" ]; then
+            APP_DIR=$(pnpm --filter "${{ inputs.app-filter }}" exec pwd)
+            echo "path=$APP_DIR/dist" >> $GITHUB_OUTPUT
+          else
+            echo "path=dist" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Sync static assets to S3 (long cache)
+        run: |
+          aws s3 sync ${{ steps.dist.outputs.path }}/ s3://${{ steps.infra.outputs.bucket }} \
             --delete \
             --cache-control "public, max-age=31536000, immutable" \
             --exclude "index.html" \
             --exclude "*.json"
 
-          aws s3 cp dist/index.html s3://${{ inputs.s3-bucket }}/index.html \
+      - name: Upload index.html (no cache)
+        run: |
+          aws s3 cp ${{ steps.dist.outputs.path }}/index.html s3://${{ steps.infra.outputs.bucket }}/index.html \
             --cache-control "no-cache, no-store, must-revalidate"
-
-          find dist -name "*.json" -exec sh -c \
-            'aws s3 cp "$1" s3://${{ inputs.s3-bucket }}/${1#dist/} --cache-control "no-cache"' _ {} \;
 
       - name: Invalidate CloudFront cache
         run: |
           aws cloudfront create-invalidation \
-            --distribution-id ${{ inputs.cloudfront-distribution-id }} \
+            --distribution-id ${{ steps.infra.outputs.distribution_id }} \
             --paths "/*"
 
       - name: Deployment Summary
@@ -97,8 +152,9 @@ jobs:
 
           | Detail | Value |
           |--------|-------|
-          | **S3 Bucket** | \`${{ inputs.s3-bucket }}\` |
-          | **Distribution** | \`${{ inputs.cloudfront-distribution-id }}\` |
+          | **App** | \`${{ inputs.app-filter || 'root' }}\` |
+          | **S3 Bucket** | \`${{ steps.infra.outputs.bucket }}\` |
+          | **Distribution** | \`${{ steps.infra.outputs.distribution_id }}\` |
           | **Region** | \`${{ inputs.aws-region }}\` |
           | **Status** | Deployed |
           EOF

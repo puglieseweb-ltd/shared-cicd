@@ -1,4 +1,4 @@
-name: TypeScript Build
+name: Monorepo CI
 
 on:
   workflow_call:
@@ -8,17 +8,21 @@ on:
         type: string
         default: '22'
       app-filter:
-        description: 'pnpm workspace filter (e.g. @noteble/app). If empty, builds from root'
+        description: 'pnpm workspace filter (e.g. @facegov/app). If empty, runs on all workspaces'
         type: string
         default: ''
-      run-tests:
-        description: Whether to run tests after build
+      run-type-check:
+        description: Whether to run type-check
         type: boolean
-        default: false
+        default: true
+      run-tests:
+        description: Whether to run tests
+        type: boolean
+        default: true
 
 jobs:
-  build:
-    name: TypeScript Build
+  ci:
+    name: Type Check & Test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -33,12 +37,13 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Build
+      - name: Type check
+        if: inputs.run-type-check
         run: |
           if [ -n "${{ inputs.app-filter }}" ]; then
-            pnpm --filter "${{ inputs.app-filter }}" run build
+            pnpm --filter "${{ inputs.app-filter }}" run type-check
           else
-            pnpm build
+            pnpm type-check
           fi
 
       - name: Test
