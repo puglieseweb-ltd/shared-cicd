@@ -1,0 +1,97 @@
+name: 'CloudFormation Stack Destroy'
+description: 'Delete a CloudFormation stack with optional pre-delete steps'
+inputs:
+  stack-name:
+    description: 'CloudFormation stack name (required — no default to prevent accidents)'
+    required: true
+  region:
+    description: 'AWS region'
+    required: false
+    default: 'eu-west-2'
+  confirm-destroy:
+    description: 'Must be literal string "yes" to proceed. Fail-closed safety.'
+    required: true
+  empty-buckets:
+    description: 'Space-separated list of S3 bucket names to empty before deletion'
+    required: false
+    default: ''
+  disable-termination-protection:
+    description: 'If true, disables termination protection before deleting'
+    required: false
+    default: 'false'
+  wait-timeout-seconds:
+    description: 'Max time to wait for deletion'
+    required: false
+    default: '1800'
+runs:
+  using: 'composite'
+  steps:
+    - name: Validate confirmation
+      shell: bash
+      run: |
+        if [ "${{ inputs.confirm-destroy }}" != "yes" ]; then
+          echo "::error::confirm-destroy must be 'yes' (got '${{ inputs.confirm-destroy }}')"
+          exit 1
+        fi
+
+    - name: Check stack exists
+      id: check
+      shell: bash
+      run: |
+        if aws cloudformation describe-stacks \
+            --stack-name "${{ inputs.stack-name }}" \
+            --region "${{ inputs.region }}" >/dev/null 2>&1; then
+          echo "exists=true" >> "$GITHUB_OUTPUT"
+          echo "Stack '${{ inputs.stack-name }}' exists — will destroy"
+        else
+          echo "exists=false" >> "$GITHUB_OUTPUT"
+          echo "Stack '${{ inputs.stack-name }}' does not exist — skipping"
+        fi
+
+    - name: Disable termination protection
+      if: steps.check.outputs.exists == 'true' && inputs.disable-termination-protection == 'true'
+      shell: bash
+      run: |
+        aws cloudformation update-termination-protection \
+          --stack-name "${{ inputs.stack-name }}" \
+          --region "${{ inputs.region }}" \
+          --no-enable-termination-protection || echo "Failed to disable termination protection (may already be disabled)"
+
+    - name: Empty S3 buckets
+      if: steps.check.outputs.exists == 'true' && inputs.empty-buckets != ''
+      shell: bash
+      run: |
+        for BUCKET in ${{ inputs.empty-buckets }}; do
+          echo "Emptying bucket: $BUCKET"
+          # Remove all versions (versioned buckets)
+          aws s3api list-object-versions --bucket "$BUCKET" --region "${{ inputs.region }}" \
+            --output json 2>/dev/null \
+            | jq -r '.Versions[]?, .DeleteMarkers[]? | "\(.Key)\t\(.VersionId)"' \
+            | while IFS=$'\t' read -r KEY VERSION_ID; do
+                [ -z "$KEY" ] && continue
+                aws s3api delete-object --bucket "$BUCKET" --key "$KEY" \
+                  --version-id "$VERSION_ID" --region "${{ inputs.region }}" >/dev/null || true
+              done
+          # Remove anything left (unversioned)
+          aws s3 rm "s3://$BUCKET" --recursive --region "${{ inputs.region }}" 2>/dev/null || true
+        done
+
+    - name: Delete stack
+      if: steps.check.outputs.exists == 'true'
+      shell: bash
+      run: |
+        echo "Deleting stack: ${{ inputs.stack-name }}"
+        aws cloudformation delete-stack \
+          --stack-name "${{ inputs.stack-name }}" \
+          --region "${{ inputs.region }}"
+
+    - name: Wait for deletion
+      if: steps.check.outputs.exists == 'true'
+      shell: bash
+      run: |
+        echo "Waiting up to ${{ inputs.wait-timeout-seconds }}s for stack deletion..."
+        timeout ${{ inputs.wait-timeout-seconds }} aws cloudformation wait stack-delete-complete \
+          --stack-name "${{ inputs.stack-name }}" \
+          --region "${{ inputs.region }}" \
+          || { echo "::warning::Stack deletion did not complete within timeout (may be in DELETE_FAILED state)"; exit 1; }
+        echo "Stack deleted successfully"

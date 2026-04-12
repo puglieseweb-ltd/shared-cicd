@@ -1,0 +1,32 @@
+name: 'ACM Certificate ARN'
+description: 'Look up an issued ACM certificate ARN matching a domain'
+inputs:
+  domain:
+    description: 'Domain name that appears in the cert SubjectAlternativeNames'
+    required: true
+  region:
+    description: 'AWS region. Use us-east-1 for CloudFront certs.'
+    required: false
+    default: 'us-east-1'
+outputs:
+  cert-arn:
+    description: 'ACM certificate ARN'
+    value: ${{ steps.lookup.outputs.cert-arn }}
+runs:
+  using: 'composite'
+  steps:
+    - name: Look up ACM certificate
+      id: lookup
+      shell: bash
+      run: |
+        CERT_ARN=$(aws acm list-certificates \
+          --region "${{ inputs.region }}" \
+          --certificate-statuses ISSUED \
+          --query "CertificateSummaryList[?contains(SubjectAlternativeNameSummaries, '${{ inputs.domain }}')].CertificateArn | [0]" \
+          --output text)
+        if [ -z "$CERT_ARN" ] || [ "$CERT_ARN" = "None" ]; then
+          echo "::error::No ACM certificate found for ${{ inputs.domain }} in ${{ inputs.region }}"
+          exit 1
+        fi
+        echo "cert-arn=$CERT_ARN" >> "$GITHUB_OUTPUT"
+        echo "Found ACM certificate: $CERT_ARN"

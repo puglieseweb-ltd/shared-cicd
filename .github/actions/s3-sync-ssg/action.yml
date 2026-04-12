@@ -1,0 +1,61 @@
+name: 'S3 Sync SSG'
+description: 'Sync a built SSG site (multi-page Astro/Next.js/Hugo) to S3 with tiered cache-control. All HTML/JSON/XML/TXT files get no-cache.'
+
+inputs:
+  source-dir:
+    description: 'Local directory containing the built site (e.g. apps/website/dist)'
+    required: true
+  bucket:
+    description: 'Target S3 bucket name'
+    required: true
+  cloudfront-distribution-id:
+    description: 'If set, invalidates /* on this distribution after sync'
+    required: false
+    default: ''
+  region:
+    description: 'AWS region'
+    required: false
+    default: 'eu-west-2'
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Sync static assets (immutable)
+      shell: bash
+      run: |
+        aws s3 sync "${{ inputs.source-dir }}" "s3://${{ inputs.bucket }}" \
+          --delete \
+          --region "${{ inputs.region }}" \
+          --cache-control "public, max-age=31536000, immutable" \
+          --exclude "*.html" \
+          --exclude "*.json" \
+          --exclude "*.xml" \
+          --exclude "*.txt"
+
+    - name: Upload HTML files (no-cache)
+      shell: bash
+      run: |
+        find "${{ inputs.source-dir }}" -name "*.html" -type f | while read -r f; do
+          KEY="${f#${{ inputs.source-dir }}/}"
+          aws s3 cp "$f" "s3://${{ inputs.bucket }}/$KEY" \
+            --region "${{ inputs.region }}" \
+            --cache-control "no-cache, no-store, must-revalidate"
+        done
+
+    - name: Upload metadata files (no-cache)
+      shell: bash
+      run: |
+        find "${{ inputs.source-dir }}" \( -name "*.json" -o -name "*.xml" -o -name "*.txt" \) -type f | while read -r f; do
+          KEY="${f#${{ inputs.source-dir }}/}"
+          aws s3 cp "$f" "s3://${{ inputs.bucket }}/$KEY" \
+            --region "${{ inputs.region }}" \
+            --cache-control "no-cache, no-store, must-revalidate"
+        done
+
+    - name: Invalidate CloudFront
+      if: inputs.cloudfront-distribution-id != ''
+      shell: bash
+      run: |
+        aws cloudfront create-invalidation \
+          --distribution-id "${{ inputs.cloudfront-distribution-id }}" \
+          --paths "/*"

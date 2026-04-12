@@ -1,0 +1,49 @@
+name: 'AWS CloudFormation Output'
+description: 'Resolve a single CloudFormation stack output value'
+
+inputs:
+  stack-name:
+    description: 'CloudFormation stack name'
+    required: true
+  output-key:
+    description: 'Name of the output to read'
+    required: true
+  region:
+    description: 'AWS region'
+    required: false
+    default: 'eu-west-2'
+  allow-empty:
+    description: 'If true, returns empty string when output missing/null; if false (default), fails with an error.'
+    required: false
+    default: 'false'
+
+outputs:
+  value:
+    description: 'The resolved output value'
+    value: ${{ steps.resolve.outputs.value }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Resolve output
+      id: resolve
+      shell: bash
+      run: |
+        VALUE=$(aws cloudformation describe-stacks \
+          --stack-name "${{ inputs.stack-name }}" \
+          --region "${{ inputs.region }}" \
+          --query "Stacks[0].Outputs[?OutputKey=='${{ inputs.output-key }}'].OutputValue" \
+          --output text 2>/dev/null || echo "")
+
+        if [ -z "$VALUE" ] || [ "$VALUE" = "None" ]; then
+          if [ "${{ inputs.allow-empty }}" = "true" ]; then
+            echo "value=" >> "$GITHUB_OUTPUT"
+            echo "Output '${{ inputs.output-key }}' not found in '${{ inputs.stack-name }}' — returning empty (allow-empty=true)"
+          else
+            echo "::error::CloudFormation output '${{ inputs.output-key }}' not found in stack '${{ inputs.stack-name }}'"
+            exit 1
+          fi
+        else
+          echo "value=$VALUE" >> "$GITHUB_OUTPUT"
+          echo "Resolved ${{ inputs.output-key }}=$VALUE"
+        fi

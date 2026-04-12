@@ -1,0 +1,209 @@
+name: SAM Deploy with Prerequisites
+
+on:
+  workflow_call:
+    inputs:
+      working-directory:
+        type: string
+        required: false
+        default: '.'
+        description: Directory containing the SAM template
+      stack-name:
+        type: string
+        required: true
+        description: Main CloudFormation stack name
+      aws-region:
+        type: string
+        required: false
+        default: 'eu-west-2'
+      python-version:
+        type: string
+        required: false
+        default: '3.11'
+      parameter-overrides:
+        type: string
+        required: false
+        default: ''
+        description: SAM parameter overrides
+      capabilities:
+        type: string
+        required: false
+        default: 'CAPABILITY_IAM'
+      environment:
+        type: string
+        required: false
+        default: 'production'
+      deploy-role-name:
+        type: string
+        required: true
+      # --- Prereq hooks ---
+      secrets-stack-template-path:
+        type: string
+        required: false
+        default: ''
+        description: Path to CloudFormation template for secrets stack. If set, deploys this stack before the main stack.
+      secrets-stack-name:
+        type: string
+        required: false
+        default: ''
+        description: Name for the secrets stack. Required when secrets-stack-template-path is set.
+      secrets-to-seed:
+        type: string
+        required: false
+        default: ''
+        description: |
+          Multi-line list of "<secret-path>:<github-secret-env-var-name>" entries.
+          For each, if the current value in AWS Secrets Manager is "PLACEHOLDER", seed it
+          from the matching env var. Requires SEED_SECRETS_JSON secret (JSON object
+          mapping env var name -> value).
+          Example:
+            /pweb-billing/prod/sentry-dsn:SENTRY_DSN
+            /pweb-billing/prod/stripe-secret-key:STRIPE_SECRET_KEY
+      pre-build-command:
+        type: string
+        required: false
+        default: ''
+        description: Shell command to run in working-directory before sam build (e.g. install a Python package into a layer)
+    secrets:
+      AWS_ACCOUNT_ID:
+        required: true
+      PARAMETER_SECRETS:
+        required: false
+      SEED_SECRETS_JSON:
+        required: false
+        description: JSON object mapping env var name -> value, used by secrets-to-seed
+      PRE_BUILD_ENV:
+        required: false
+        description: |
+          Multi-line list of KEY=VALUE entries exported as env vars during the
+          pre-build-command step. Useful for passing tokens (e.g. a PAT for
+          cross-repo git+https pip installs) without embedding them in the
+          command string.
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/${{ inputs.deploy-role-name }}
+          aws-region: ${{ inputs.aws-region }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ inputs.python-version }}
+
+      - uses: aws-actions/setup-sam@v2
+        with:
+          use-installer: true
+
+      - name: Deploy secrets stack
+        if: inputs.secrets-stack-template-path != ''
+        working-directory: ${{ inputs.working-directory }}
+        run: |
+          if [ -z "${{ inputs.secrets-stack-name }}" ]; then
+            echo "::error::secrets-stack-name is required when secrets-stack-template-path is set"
+            exit 1
+          fi
+          ENV_PARAM=""
+          # Extract Environment value from parameter-overrides if present
+          if echo "${{ inputs.parameter-overrides }}" | grep -q "Environment="; then
+            ENV_VALUE=$(echo "${{ inputs.parameter-overrides }}" | grep -oE 'Environment=[^ ]+' | head -1 | cut -d= -f2)
+            ENV_PARAM="Environment=$ENV_VALUE"
+          fi
+          aws cloudformation deploy \
+            --template-file "${{ inputs.secrets-stack-template-path }}" \
+            --stack-name "${{ inputs.secrets-stack-name }}" \
+            --no-fail-on-empty-changeset \
+            --region "${{ inputs.aws-region }}" \
+            ${ENV_PARAM:+--parameter-overrides $ENV_PARAM}
+
+      - name: Seed secrets from GitHub Secrets
+        if: inputs.secrets-to-seed != ''
+        env:
+          SEED_SECRETS_JSON: ${{ secrets.SEED_SECRETS_JSON }}
+        run: |
+          if [ -z "$SEED_SECRETS_JSON" ]; then
+            echo "::warning::secrets-to-seed was provided but SEED_SECRETS_JSON secret is empty — skipping"
+            exit 0
+          fi
+          while IFS= read -r LINE; do
+            LINE="$(echo "$LINE" | xargs)"
+            [ -z "$LINE" ] && continue
+            SECRET_PATH="${LINE%%:*}"
+            VAR_NAME="${LINE##*:}"
+            VALUE=$(echo "$SEED_SECRETS_JSON" | jq -r --arg k "$VAR_NAME" '.[$k] // ""')
+            if [ -z "$VALUE" ]; then
+              echo "  Skipped $SECRET_PATH (no value for $VAR_NAME)"
+              continue
+            fi
+            CURRENT=$(aws secretsmanager get-secret-value \
+              --secret-id "$SECRET_PATH" \
+              --query SecretString --output text \
+              --region "${{ inputs.aws-region }}" 2>/dev/null || echo "")
+            if [ "$CURRENT" = "PLACEHOLDER" ]; then
+              aws secretsmanager put-secret-value \
+                --secret-id "$SECRET_PATH" \
+                --secret-string "$VALUE" \
+                --region "${{ inputs.aws-region }}"
+              echo "  Seeded $SECRET_PATH from $VAR_NAME"
+            else
+              echo "  Skipped $SECRET_PATH (already set)"
+            fi
+          done <<< "${{ inputs.secrets-to-seed }}"
+
+      - name: Pre-build command
+        if: inputs.pre-build-command != ''
+        working-directory: ${{ inputs.working-directory }}
+        env:
+          PRE_BUILD_ENV: ${{ secrets.PRE_BUILD_ENV }}
+        run: |
+          if [ -n "$PRE_BUILD_ENV" ]; then
+            while IFS= read -r LINE; do
+              LINE="$(echo "$LINE" | xargs)"
+              [ -z "$LINE" ] && continue
+              # Export to current shell and mask the value
+              KEY="${LINE%%=*}"
+              VAL="${LINE#*=}"
+              echo "::add-mask::$VAL"
+              export "$KEY=$VAL"
+            done <<< "$PRE_BUILD_ENV"
+          fi
+          ${{ inputs.pre-build-command }}
+
+      - name: SAM build
+        working-directory: ${{ inputs.working-directory }}
+        run: sam build --use-container --parallel
+
+      - name: SAM deploy
+        working-directory: ${{ inputs.working-directory }}
+        run: |
+          PARAMS="${{ inputs.parameter-overrides }}"
+          if [ -n "${{ secrets.PARAMETER_SECRETS }}" ]; then
+            PARAMS="$PARAMS ${{ secrets.PARAMETER_SECRETS }}"
+          fi
+          sam deploy \
+            --stack-name "${{ inputs.stack-name }}" \
+            --region "${{ inputs.aws-region }}" \
+            --capabilities ${{ inputs.capabilities }} \
+            --no-confirm-changeset \
+            --no-fail-on-empty-changeset \
+            --resolve-s3 \
+            ${PARAMS:+--parameter-overrides $PARAMS}
+
+      - name: Deployment summary
+        run: |
+          cat >> "$GITHUB_STEP_SUMMARY" << EOF
+          ## SAM Deployment Summary
+          | Detail | Value |
+          |--------|-------|
+          | **Stack** | \`${{ inputs.stack-name }}\` |
+          | **Region** | \`${{ inputs.aws-region }}\` |
+          | **Environment** | \`${{ inputs.environment }}\` |
+          EOF

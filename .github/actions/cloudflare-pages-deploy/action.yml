@@ -1,0 +1,70 @@
+name: 'Cloudflare Pages Deploy'
+description: 'Deploy built assets to Cloudflare Pages with wrangler, retrying on transient failures.'
+
+inputs:
+  project-name:
+    description: 'Cloudflare Pages project name'
+    required: true
+  directory:
+    description: 'Built assets directory (e.g. apps/app/dist)'
+    required: true
+  branch:
+    description: 'Branch name for the deployment'
+    required: true
+  cloudflare-api-token:
+    description: 'Cloudflare API token (pass as secret)'
+    required: true
+  cloudflare-account-id:
+    description: 'Cloudflare account ID'
+    required: true
+  max-retries:
+    description: 'Number of retry attempts'
+    required: false
+    default: '3'
+  timeout-seconds:
+    description: 'Per-attempt timeout (seconds)'
+    required: false
+    default: '120'
+
+outputs:
+  preview-url:
+    description: 'Deployed preview URL'
+    value: ${{ steps.deploy.outputs.preview-url }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Deploy with retry
+      id: deploy
+      shell: bash
+      env:
+        CLOUDFLARE_API_TOKEN: ${{ inputs.cloudflare-api-token }}
+        CLOUDFLARE_ACCOUNT_ID: ${{ inputs.cloudflare-account-id }}
+      run: |
+        MAX_RETRIES=${{ inputs.max-retries }}
+        TIMEOUT_SECONDS=${{ inputs.timeout-seconds }}
+        ATTEMPT=1
+        DELAY=10
+
+        while [ $ATTEMPT -le $MAX_RETRIES ]; do
+          echo "Deployment attempt $ATTEMPT/$MAX_RETRIES..."
+
+          if OUTPUT=$(timeout ${TIMEOUT_SECONDS}s npx wrangler@latest pages deploy "${{ inputs.directory }}" \
+              --project-name="${{ inputs.project-name }}" \
+              --branch="${{ inputs.branch }}" 2>&1); then
+            echo "$OUTPUT"
+            URL=$(echo "$OUTPUT" | grep -oE "https://[a-z0-9-]+\.${{ inputs.project-name }}\.pages\.dev" | head -1)
+            echo "preview-url=$URL" >> "$GITHUB_OUTPUT"
+            echo "::notice::Cloudflare Pages deployment succeeded: $URL"
+            exit 0
+          fi
+
+          echo "$OUTPUT"
+          echo "::warning::Attempt $ATTEMPT failed. Retrying in ${DELAY}s..."
+          sleep $DELAY
+          DELAY=$((DELAY * 2))
+          ATTEMPT=$((ATTEMPT + 1))
+        done
+
+        echo "::error::Cloudflare Pages deployment failed after $MAX_RETRIES attempts"
+        exit 1
