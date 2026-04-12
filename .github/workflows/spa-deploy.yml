@@ -39,6 +39,10 @@ on:
         description: GitHub environment name for approvals/secrets
         type: string
         default: 'production'
+      sibling-repos:
+        description: 'Space-separated list of sibling repos to checkout (e.g. "shared-react-ui shared-utils"). Checked out at ../repo-name relative to the main repo.'
+        type: string
+        default: ''
     secrets:
       AWS_ACCOUNT_ID:
         required: true
@@ -60,6 +64,13 @@ jobs:
     environment: ${{ inputs.environment }}
     steps:
       - uses: actions/checkout@v4
+
+      - name: Checkout sibling repos
+        if: inputs.sibling-repos != ''
+        run: |
+          for repo in ${{ inputs.sibling-repos }}; do
+            git clone --depth 1 https://github.com/${{ github.repository_owner }}/${repo}.git ../${repo}
+          done
 
       - uses: pnpm/action-setup@v4
 
