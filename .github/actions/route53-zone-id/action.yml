@@ -1,0 +1,29 @@
+name: 'Route53 Zone ID'
+description: 'Look up a Route53 hosted zone ID by domain name'
+inputs:
+  domain:
+    description: 'Domain name (e.g. puglieseweb.com). Trailing dot is optional.'
+    required: true
+outputs:
+  zone-id:
+    description: 'Route53 hosted zone ID (without /hostedzone/ prefix)'
+    value: ${{ steps.lookup.outputs.zone-id }}
+runs:
+  using: 'composite'
+  steps:
+    - name: Look up hosted zone
+      id: lookup
+      shell: bash
+      run: |
+        DOMAIN="${{ inputs.domain }}"
+        # Ensure trailing dot
+        [ "${DOMAIN: -1}" = "." ] || DOMAIN="${DOMAIN}."
+        ZONE_ID=$(aws route53 list-hosted-zones \
+          --query "HostedZones[?Name=='${DOMAIN}'].Id" \
+          --output text | cut -d'/' -f3)
+        if [ -z "$ZONE_ID" ] || [ "$ZONE_ID" = "None" ]; then
+          echo "::error::No Route53 hosted zone found for $DOMAIN"
+          exit 1
+        fi
+        echo "zone-id=$ZONE_ID" >> "$GITHUB_OUTPUT"
+        echo "Found hosted zone: $ZONE_ID"

@@ -1,0 +1,58 @@
+name: 'S3 Sync SPA'
+description: 'Sync a built Single Page App to S3 with tiered cache-control and optional CloudFront invalidation.'
+
+inputs:
+  source-dir:
+    description: 'Local directory containing the built SPA (e.g. apps/app/dist)'
+    required: true
+  bucket:
+    description: 'Target S3 bucket name'
+    required: true
+  cloudfront-distribution-id:
+    description: 'If set, invalidates /* on this distribution after sync'
+    required: false
+    default: ''
+  region:
+    description: 'AWS region'
+    required: false
+    default: 'eu-west-2'
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Sync static assets (immutable)
+      shell: bash
+      run: |
+        aws s3 sync "${{ inputs.source-dir }}" "s3://${{ inputs.bucket }}" \
+          --delete \
+          --region "${{ inputs.region }}" \
+          --cache-control "public, max-age=31536000, immutable" \
+          --exclude "index.html" \
+          --exclude "*.json"
+
+    - name: Upload index.html (no-cache)
+      shell: bash
+      run: |
+        if [ -f "${{ inputs.source-dir }}/index.html" ]; then
+          aws s3 cp "${{ inputs.source-dir }}/index.html" "s3://${{ inputs.bucket }}/index.html" \
+            --region "${{ inputs.region }}" \
+            --cache-control "no-cache, no-store, must-revalidate"
+        fi
+
+    - name: Upload JSON files (no-cache)
+      shell: bash
+      run: |
+        find "${{ inputs.source-dir }}" -name "*.json" -type f | while read -r f; do
+          KEY="${f#${{ inputs.source-dir }}/}"
+          aws s3 cp "$f" "s3://${{ inputs.bucket }}/$KEY" \
+            --region "${{ inputs.region }}" \
+            --cache-control "no-cache, no-store, must-revalidate"
+        done
+
+    - name: Invalidate CloudFront
+      if: inputs.cloudfront-distribution-id != ''
+      shell: bash
+      run: |
+        aws cloudfront create-invalidation \
+          --distribution-id "${{ inputs.cloudfront-distribution-id }}" \
+          --paths "/*"

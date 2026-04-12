@@ -52,6 +52,8 @@ on:
         required: false
       REACT_APP_API_URL:
         required: false
+      REACT_APP_API_BASE_URL:
+        required: false
       NODE_AUTH_TOKEN:
         required: false
       SIBLING_REPOS_TOKEN:
@@ -120,6 +122,7 @@ jobs:
           REACT_APP_USER_POOL_ID: ${{ secrets.REACT_APP_USER_POOL_ID }}
           REACT_APP_CLIENT_ID: ${{ secrets.REACT_APP_CLIENT_ID }}
           REACT_APP_API_URL: ${{ secrets.REACT_APP_API_URL }}
+          REACT_APP_API_BASE_URL: ${{ secrets.REACT_APP_API_BASE_URL }}
 
       - uses: aws-actions/configure-aws-credentials@v4
         with:

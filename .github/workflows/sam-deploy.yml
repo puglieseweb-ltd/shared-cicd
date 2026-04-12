@@ -14,7 +14,7 @@ on:
       aws-region:
         description: AWS region to deploy to
         type: string
-        default: 'eu-west-1'
+        default: 'eu-west-2'
       python-version:
         description: Python version for SAM build
         type: string
