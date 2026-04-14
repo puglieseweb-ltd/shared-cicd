@@ -35,6 +35,14 @@ on:
         description: IAM role name for OIDC authentication
         required: true
         type: string
+      pre-build-command:
+        description: |
+          Arbitrary shell command run in working-directory before `sam build`.
+          Use for build-time artifact generation (e.g. merged OpenAPI specs
+          from Powertools handlers baked into a spec-serving Lambda).
+        type: string
+        required: false
+        default: ''
     secrets:
       AWS_ACCOUNT_ID:
         required: true
@@ -64,6 +72,11 @@ jobs:
           python-version: ${{ inputs.python-version }}
 
       - uses: aws-actions/setup-sam@v2
+
+      - name: Pre-build command
+        if: inputs.pre-build-command != ''
+        working-directory: ${{ inputs.working-directory }}
+        run: ${{ inputs.pre-build-command }}
 
       - name: SAM Build
         working-directory: ${{ inputs.working-directory }}
