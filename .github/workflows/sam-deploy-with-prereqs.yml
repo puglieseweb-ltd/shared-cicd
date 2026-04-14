@@ -80,15 +80,6 @@ on:
           pip install -t target, relative to working-directory. Default is
           the conventional Python 3.11 layer path. Directory is created if
           missing.
-      pre-build-command:
-        type: string
-        required: false
-        default: ''
-        description: |
-          Arbitrary shell command run in working-directory before `sam build`.
-          Prefer `layer-packages` for pip installs; reserve this for other
-          needs (code generation, file shuffling, etc.). PRE_BUILD_ENV
-          secrets are exported as env vars for this step.
     secrets:
       AWS_ACCOUNT_ID:
         required: true
@@ -105,12 +96,6 @@ on:
           URLs, the reusable writes ~/.git-credentials so pip's underlying
           git clone picks up the token automatically. Cleaned up after the
           step so the credential doesn't persist into subsequent steps.
-      PRE_BUILD_ENV:
-        required: false
-        description: |
-          Multi-line list of KEY=VALUE entries exported as env vars during
-          the pre-build-command step. Edge-case escape hatch — prefer the
-          typed layer-packages + CROSS_REPO_TOKEN inputs for pip installs.
 
 jobs:
   deploy:
@@ -228,33 +213,6 @@ jobs:
             pip install "$PKG" -t "${{ inputs.layer-install-target }}"
             echo "::endgroup::"
           done <<< "${{ inputs.layer-packages }}"
-
-      - name: Pre-build command
-        if: inputs.pre-build-command != ''
-        working-directory: ${{ inputs.working-directory }}
-        env:
-          PRE_BUILD_ENV: ${{ secrets.PRE_BUILD_ENV }}
-        run: |
-          # Export PRE_BUILD_ENV lines as env vars in the current shell so
-          # the pre-build-command can reference them via $VAR. `set -a`
-          # makes subsequent assignments auto-exported; `source` via process
-          # substitution applies them without starting a subshell that
-          # would discard the exports.
-          if [ -n "${PRE_BUILD_ENV:-}" ]; then
-            set -a
-            # shellcheck disable=SC1090
-            source <(printf '%s\n' "$PRE_BUILD_ENV")
-            set +a
-            # Mask each value in the log (best-effort — GitHub already
-            # masks registered secret values).
-            while IFS= read -r LINE; do
-              LINE="$(echo "$LINE" | xargs)"
-              [ -z "$LINE" ] && continue
-              VAL="${LINE#*=}"
-              echo "::add-mask::$VAL"
-            done <<< "$PRE_BUILD_ENV"
-          fi
-          ${{ inputs.pre-build-command }}
 
       - name: SAM build
         working-directory: ${{ inputs.working-directory }}
