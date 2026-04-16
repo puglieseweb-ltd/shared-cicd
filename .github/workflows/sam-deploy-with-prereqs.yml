@@ -75,11 +75,29 @@ on:
       layer-install-target:
         type: string
         required: false
-        default: 'layers/common/python/lib/python3.11/site-packages'
+        default: 'layers/common'
         description: |
           pip install -t target, relative to working-directory. Default is
-          the conventional Python 3.11 layer path. Directory is created if
-          missing.
+          the SAM layer ContentUri root. SAM build with
+          `BuildMethod: python3.11` wraps the entire layer ContentUri
+          inside `python/` for the artifact, so installing to
+          `layers/common` puts packages at `/opt/python/<pkg>/` at
+          runtime (importable). Installing to a nested
+          `python/lib/python3.11/site-packages` ends up at
+          `/opt/python/python/lib/...` which is NOT on Lambda's
+          PYTHONPATH. Override only if your layer doesn't use the
+          standard SAM Python build.
+
+      lambda-architecture:
+        type: string
+        required: false
+        default: 'arm64'
+        description: |
+          Lambda runtime architecture. Layer-packages installs are pinned
+          to this arch via pip's --platform flag so transitive C-extension
+          deps (pydantic-core, cryptography, …) get the right wheels even
+          when the runner is x86_64. Set to 'x86_64' if your stack uses
+          the older default architecture.
       pre-build-command:
         type: string
         required: false
@@ -216,11 +234,34 @@ jobs:
 
           mkdir -p "${{ inputs.layer-install-target }}"
 
+          # Lambda's runtime architecture differs from the GitHub runner
+          # (arm64 vs x86_64). Pip downloads wheels for the runner arch by
+          # default, which fails at Lambda cold-start with `No module
+          # named '<pkg>._<pkg>'` for any package that ships a native
+          # extension (pydantic-core, cryptography, lxml, …). Force pip
+          # to fetch wheels for the Lambda arch.
+          #
+          # --only-binary=:all: applies to indirect dependencies only —
+          # locally-supplied paths and VCS URLs (git+https://) build
+          # from source as usual. Pure-Python packages have any-arch
+          # wheels so the platform pin is a no-op for them.
+          case "${{ inputs.lambda-architecture }}" in
+            arm64)   PLATFORM=manylinux2014_aarch64 ;;
+            x86_64)  PLATFORM=manylinux2014_x86_64 ;;
+            *)       echo "::error::unknown lambda-architecture '${{ inputs.lambda-architecture }}'"; exit 1 ;;
+          esac
+          PIP_PLATFORM_FLAGS=(
+            --platform "$PLATFORM"
+            --python-version 3.11
+            --implementation cp
+            --only-binary=:all:
+          )
+
           while IFS= read -r PKG; do
             PKG="$(echo "$PKG" | xargs)"
             [ -z "$PKG" ] && continue
             echo "::group::pip install $PKG"
-            pip install "$PKG" -t "${{ inputs.layer-install-target }}"
+            pip install "$PKG" -t "${{ inputs.layer-install-target }}" "${PIP_PLATFORM_FLAGS[@]}"
             echo "::endgroup::"
           done <<< "${{ inputs.layer-packages }}"
 
