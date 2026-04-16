@@ -242,6 +242,56 @@ jobs:
             echo "::endgroup::"
           done <<< "${{ inputs.layer-packages }}"
 
+      # Preflight: when layer-packages is in use, SAM build relies on
+      # the layer's `Metadata.BuildArchitecture` to pick the correct
+      # wheel arch for C-extension deps (pydantic-core, cryptography,
+      # …). Missing this is silent at deploy time but detonates at
+      # Lambda cold-start with `No module named
+      # 'pydantic_core._pydantic_core'`. Refuse to proceed so the
+      # ImportModuleError gets caught here, not in prod.
+      - name: Preflight check — layer BuildArchitecture
+        if: inputs.layer-packages != ''
+        working-directory: ${{ inputs.working-directory }}
+        run: |
+          set -euo pipefail
+          pip install --quiet cfn-flip
+          python3 <<'PY'
+          import sys
+          from cfn_tools import load_yaml
+
+          template_path = 'template.yaml'
+          try:
+              t = load_yaml(open(template_path).read())
+          except FileNotFoundError:
+              print(f'::warning::{template_path} not found; skipping layer-arch preflight')
+              sys.exit(0)
+
+          missing = []
+          for name, res in (t.get('Resources') or {}).items():
+              if res.get('Type') != 'AWS::Serverless::LayerVersion':
+                  continue
+              metadata = res.get('Metadata') or {}
+              build_method = str(metadata.get('BuildMethod', ''))
+              if not build_method.startswith('python'):
+                  continue
+              if 'BuildArchitecture' not in metadata:
+                  missing.append(name)
+
+          if missing:
+              print('::error::Layer(s) %s use BuildMethod=python* but lack '
+                    'Metadata.BuildArchitecture. When `layer-packages` '
+                    'pip-installs a C-extension dep (pydantic-core, '
+                    'cryptography, orjson, …), SAM build defaults to '
+                    'x86_64 wheels unless BuildArchitecture is set — the '
+                    'Lambda will 502 at cold-start with ImportModuleError. '
+                    'Add `BuildArchitecture: arm64` (or `x86_64`) to each '
+                    'layer Metadata matching your Globals.Architectures.'
+                    % ', '.join(missing))
+              sys.exit(1)
+          print(f'Preflight OK: {len(t.get("Resources") or {})} resources scanned, '
+                f'all python-build layers have BuildArchitecture set.')
+          PY
+
       - name: Pre-build command
         if: inputs.pre-build-command != ''
         working-directory: ${{ inputs.working-directory }}
