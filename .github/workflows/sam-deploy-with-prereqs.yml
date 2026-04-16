@@ -88,16 +88,6 @@ on:
           PYTHONPATH. Override only if your layer doesn't use the
           standard SAM Python build.
 
-      lambda-architecture:
-        type: string
-        required: false
-        default: 'arm64'
-        description: |
-          Lambda runtime architecture. Layer-packages installs are pinned
-          to this arch via pip's --platform flag so transitive C-extension
-          deps (pydantic-core, cryptography, …) get the right wheels even
-          when the runner is x86_64. Set to 'x86_64' if your stack uses
-          the older default architecture.
       pre-build-command:
         type: string
         required: false
@@ -234,38 +224,21 @@ jobs:
 
           mkdir -p "${{ inputs.layer-install-target }}"
 
-          # Lambda's runtime architecture differs from the GitHub runner
-          # (arm64 vs x86_64). Pip downloads wheels for the runner arch by
-          # default, which fails at Lambda cold-start with `No module
-          # named '<pkg>._<pkg>'` for any package that ships a native
-          # extension (pydantic-core, cryptography, lxml, …). Force pip
-          # to fetch wheels for the Lambda arch.
-          #
-          # --only-binary=:all: applies to indirect dependencies only —
-          # locally-supplied paths and VCS URLs (git+https://) build
-          # from source as usual. Pure-Python packages have any-arch
-          # wheels so the platform pin is a no-op for them.
-          ARCH="${{ inputs.lambda-architecture }}"
-          if [ "$ARCH" = "arm64" ]; then
-            PLATFORM=manylinux2014_aarch64
-          elif [ "$ARCH" = "x86_64" ]; then
-            PLATFORM=manylinux2014_x86_64
-          else
-            echo "::error::unknown lambda-architecture '$ARCH'"
-            exit 1
-          fi
-          PIP_PLATFORM_FLAGS=(
-            --platform "$PLATFORM"
-            --python-version 3.11
-            --implementation cp
-            --only-binary=:all:
-          )
-
+          # Install at the runner's native arch (x86_64). The runtime arch
+          # of the Lambda layer is owned by SAM build via the layer's
+          # `Metadata: BuildArchitecture: arm64` (or x86_64). SAM build
+          # downloads the right-arch wheels for requirements.txt deps
+          # during its own pip install, and C-extension wheels carry the
+          # arch in their filename so both archs can coexist in the
+          # final layer artifact — Python at runtime picks the matching
+          # one. Forcing --platform here would break the pre-build
+          # OpenAPI generator (which runs on the x86_64 runner with
+          # PYTHONPATH pointed at the layer dir).
           while IFS= read -r PKG; do
             PKG="$(echo "$PKG" | xargs)"
             [ -z "$PKG" ] && continue
             echo "::group::pip install $PKG"
-            pip install "$PKG" -t "${{ inputs.layer-install-target }}" "${PIP_PLATFORM_FLAGS[@]}"
+            pip install "$PKG" -t "${{ inputs.layer-install-target }}"
             echo "::endgroup::"
           done <<< "${{ inputs.layer-packages }}"
 
