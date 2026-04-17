@@ -16,6 +16,9 @@ name: Branch Hygiene
 on:
   workflow_call:
 
+permissions:
+  pull-requests: read
+
 jobs:
   check-merged-branch:
     name: Block pushes to merged branches
@@ -38,7 +41,7 @@ jobs:
             --head "$BRANCH" \
             --state all \
             --json number,url,state,title \
-            --jq '[.[] | select(.state != "OPEN")] | .[0]' 2>/dev/null)
+            --jq '[.[] | select(.state != "OPEN")] | .[0]')
 
           if [ -n "$CLOSED_PR" ] && [ "$CLOSED_PR" != "null" ]; then
             URL=$(echo "$CLOSED_PR" | jq -r '.url')
