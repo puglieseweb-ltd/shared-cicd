@@ -16,9 +16,6 @@ name: Branch Hygiene
 on:
   workflow_call:
 
-permissions:
-  pull-requests: read
-
 jobs:
   check-merged-branch:
     name: Block pushes to merged branches
