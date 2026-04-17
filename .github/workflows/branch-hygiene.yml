@@ -1,0 +1,52 @@
+name: Branch Hygiene
+
+# Reusable workflow: block pushes to branches with merged/closed PRs.
+# Caller repos add a small workflow that invokes this on push.
+#
+# Example caller (.github/workflows/branch-hygiene.yml):
+#
+#   name: Branch Hygiene
+#   on:
+#     push:
+#       branches-ignore: [main]
+#   jobs:
+#     check:
+#       uses: puglieseweb-ltd/shared-cicd/.github/workflows/branch-hygiene.yml@main
+
+on:
+  workflow_call:
+
+jobs:
+  check-merged-branch:
+    name: Block pushes to merged branches
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check if branch has a merged or closed PR
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          BRANCH="${GITHUB_HEAD_REF:-${GITHUB_REF_NAME}}"
+
+          # Skip main/master
+          case "$BRANCH" in
+            main|master) echo "Default branch — skipping."; exit 0 ;;
+          esac
+
+          # Query PRs for this branch
+          CLOSED_PR=$(gh pr list \
+            --repo "$GITHUB_REPOSITORY" \
+            --head "$BRANCH" \
+            --state all \
+            --json number,url,state,title \
+            --jq '[.[] | select(.state != "OPEN")] | .[0]' 2>/dev/null)
+
+          if [ -n "$CLOSED_PR" ] && [ "$CLOSED_PR" != "null" ]; then
+            URL=$(echo "$CLOSED_PR" | jq -r '.url')
+            STATE=$(echo "$CLOSED_PR" | jq -r '.state')
+            TITLE=$(echo "$CLOSED_PR" | jq -r '.title')
+
+            echo "::error::Branch '$BRANCH' has a $STATE PR: $TITLE ($URL). Create a new branch instead."
+            exit 1
+          fi
+
+          echo "Branch '$BRANCH' has no closed PRs — OK."
