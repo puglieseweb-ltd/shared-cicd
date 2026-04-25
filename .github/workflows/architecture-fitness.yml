@@ -1,0 +1,39 @@
+name: Architecture Fitness Tests
+
+on:
+  workflow_call:
+    inputs:
+      backend-dir:
+        description: 'Path to backend directory (auto-detected from backend/ if omitted)'
+        type: string
+        default: ''
+      app-src-dir:
+        description: 'Path to frontend app source (auto-detected from apps/app/src/ if omitted)'
+        type: string
+        default: ''
+
+jobs:
+  fitness-tests:
+    name: Architecture Fitness Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Checkout shared-arch-fitness-tests
+        uses: actions/checkout@v4
+        with:
+          repository: puglieseweb-ltd/shared-arch-fitness-tests
+          path: .arch-fitness-tests
+          token: ${{ github.token }}
+
+      - name: Run architecture fitness tests
+        run: |
+          args="."
+          if [ -n "${{ inputs.backend-dir }}" ]; then
+            args="$args --backend-dir ${{ inputs.backend-dir }}"
+          fi
+          if [ -n "${{ inputs.app-src-dir }}" ]; then
+            args="$args --app-src-dir ${{ inputs.app-src-dir }}"
+          fi
+          bash .arch-fitness-tests/scripts/run_all.sh $args
